@@ -124,16 +124,24 @@ project(MicroOcpp VERSION 1.2.0)
 
 add_library(MicroOcpp ${MO_SRC})
 
+# ArduinoJson: standalone layout (lib/ArduinoJson) or Simulator layout (../ArduinoJson)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/lib/ArduinoJson/src")
+    set(MO_ARDUINOJSON_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/lib/ArduinoJson/src")
+else()
+    set(MO_ARDUINOJSON_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../ArduinoJson/src")
+endif()
+
 target_include_directories(MicroOcpp PUBLIC
     "./src"
-    "../ArduinoJson/src"
+    "${MO_ARDUINOJSON_INCLUDE}"
 )
 
 target_compile_definitions(MicroOcpp PUBLIC
     MO_PLATFORM=MO_PLATFORM_UNIX
 )
 
-# Unit tests
+# Unit tests (only when this repo is the top-level project)
+if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 
 set(MO_SRC_UNIT
     tests/helpers/testHelper.cpp
@@ -216,3 +224,5 @@ target_compile_options(mo_unit_tests PUBLIC
 target_link_options(mo_unit_tests PUBLIC
     --coverage
 )
+
+endif() # CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME
