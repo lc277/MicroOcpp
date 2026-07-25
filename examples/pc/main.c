@@ -6,16 +6,16 @@
  */
 
 #include <signal.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdbool.h>
 
-#include <mongoose.h>
-#include <MicroOcpp_c.h>
-#include <MicroOcppMongooseClient_c.h>
 #include <MicroOcpp/Platform.h>
+#include <MicroOcppMongooseClient_c.h>
+#include <MicroOcpp_c.h>
+#include <mongoose.h>
 
-#define OCPP_BACKEND_URL "ws://echo.websocket.events"
+#define OCPP_BACKEND_URL   "ws://127.0.0.1:8080/ocpp/"
 #define OCPP_CHARGE_BOX_ID "charger-01"
 
 /*
@@ -27,39 +27,33 @@
 
 static volatile int g_running = 1;
 
-static void on_signal(int sig)
-{
+static void on_signal(int sig) {
     (void)sig;
     g_running = 0;
 }
 
-static void console_out(const char *msg)
-{
+static void console_out(const char* msg) {
     fputs(msg, stdout);
     fflush(stdout);
 }
 
 /* Inputs / outputs (C callbacks) */
 
-static int energy_meter_input(void)
-{
+static int energy_meter_input(void) {
     /* return energy register in watt-hours */
     return 0;
 }
 
-static void smart_charging_current_output(float limit)
-{
+static void smart_charging_current_output(float limit) {
     printf("[main] Smart Charging allows maximum charge rate: %.0f\n", limit);
 }
 
-static bool connector_plugged_input(void)
-{
+static bool connector_plugged_input(void) {
     /* return true if an EV is plugged to this EVSE */
     return false;
 }
 
-int main(void)
-{
+int main(void) {
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
@@ -67,22 +61,23 @@ int main(void)
 
     struct mg_mgr mgr;
     mg_mgr_init(&mgr);
+    mg_log_set(MG_LL_INFO);
 
     struct OCPP_FilesystemOpt fsopt = {
         .use = true,
         .mount = true,
-        .formatFsOnFail = true};
+        .formatFsOnFail = true,
+    };
 
     /*
      * WebSocket connection via MicroOcppMongoose (C API)
      */
-    OCPP_Connection *osock = ocpp_makeConnection(
-        &mgr,
-        OCPP_BACKEND_URL,
-        OCPP_CHARGE_BOX_ID,
-        "", /* auth key */
-        "", /* CA cert (needed for wss://) */
-        fsopt);
+    OCPP_Connection* osock = ocpp_makeConnection(&mgr,
+                                                 OCPP_BACKEND_URL,
+                                                 OCPP_CHARGE_BOX_ID,
+                                                 "", /* auth key */
+                                                 "", /* CA cert (needed for wss://) */
+                                                 fsopt);
 
     /*
      * Initialize the OCPP library
@@ -101,8 +96,7 @@ int main(void)
     printf("[main] MicroOcpp PC example running (Ctrl+C to stop)\n");
     printf("[main] Backend: %s/%s\n", OCPP_BACKEND_URL, OCPP_CHARGE_BOX_ID);
 
-    while (g_running)
-    {
+    while (g_running) {
         /*
          * Drive Mongoose (sockets / WebSocket) and MicroOcpp
          */
@@ -112,45 +106,32 @@ int main(void)
         /*
          * Energize EV plug if OCPP transaction is up and running
          */
-        if (ocpp_ocppPermitsCharge())
-        {
+        if (ocpp_ocppPermitsCharge()) {
             /* OCPP set up and transaction running. Energize the EV plug here */
-        }
-        else
-        {
+        } else {
             /* No transaction running at the moment. De-energize EV plug */
         }
 
         /*
          * Use NFC reader to start and stop transactions
          */
-        if (/* RFID chip detected? */ 0)
-        {
-            const char *idTag = "0123456789ABCD"; /* e.g. RFID.readIdTag() */
+        if (/* RFID chip detected? */ 0) {
+            const char* idTag = "0123456789ABCD"; /* e.g. RFID.readIdTag() */
 
-            if (!ocpp_isTransactionActive())
-            {
+            if (!ocpp_isTransactionActive()) {
                 printf("[main] Begin Transaction with idTag %s\n", idTag);
-                if (ocpp_beginTransaction(idTag))
-                {
+                if (ocpp_beginTransaction(idTag)) {
                     printf("[main] Transaction initiated. OCPP lib will send a StartTransaction when "
                            "ConnectorPlugged Input becomes true and if the Authorization succeeds\n");
-                }
-                else
-                {
+                } else {
                     printf("[main] No transaction initiated\n");
                 }
-            }
-            else
-            {
-                const char *txTag = ocpp_getTransactionIdTag();
-                if (txTag && strcmp(txTag, idTag) == 0)
-                {
+            } else {
+                const char* txTag = ocpp_getTransactionIdTag();
+                if (txTag && strcmp(txTag, idTag) == 0) {
                     printf("[main] End transaction by RFID card\n");
                     ocpp_endTransaction(idTag, NULL);
-                }
-                else
-                {
+                } else {
                     printf("[main] Cannot end transaction by RFID card (different card?)\n");
                 }
             }
