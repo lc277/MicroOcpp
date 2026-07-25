@@ -1,0 +1,1038 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>MicroOcpp Simulator</title>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="./uPlot.min.css" />
+    <script src="./uPlot.iife.min.js"></script>
+    <script src="./dashboard.js"></script>
+    <script>
+      Dashboard.init({
+        debug: false,
+        auth: true,
+        data: {
+          c1: {
+            evPlugged: false, evsePlugged: false, evReady: false, evseReady: false,
+            chargePointStatus: 'Available', energy: 0, power: 0, current: 0, voltage: 0,
+            idTag: '', transactionId: -1, nfcTag: '', maxPower: 11000, maxCurrent: 0
+          },
+          c2: {
+            evPlugged: false, evsePlugged: false, evReady: false, evseReady: false,
+            chargePointStatus: 'Available', energy: 0, power: 0, current: 0, voltage: 0,
+            idTag: '', transactionId: -1, nfcTag: '', maxPower: 11000, maxCurrent: 0
+          },
+          g1: { data: [] },
+          g2: { data: [] },
+          ocpp: {
+            backendUrl: '', chargeBoxId: '', authorizationKey: '',
+            caCert: '', dnsUrl: '',
+            pingInterval: 10, reconnectInterval: 30, connected: false
+          },
+          station: {
+            chargePointModel: 'MicroOcpp Simulator',
+            chargePointSerialNumber: '',
+            chargePointVendor: 'MicroOcpp',
+            firmwareVersion: '0.0.1'
+          },
+          network: {
+            ssid: 'company_wifi_ef3c98', password: '', enabled: true,
+            status: 'Connected: Local_Network_Point'
+          },
+          security: {
+            caCert: '', cipherName: 'TLS', cipherVersion: 'v2.3.1', cipherExpiry: '26.12.2026'
+          },
+          firmware: {
+            version: '0.0.1', date: '', status: 'Idle',
+            url: 'https://example.com/ota.json', interval: 3600
+          },
+          event: { start: 0, end: 100, data: [] },
+          log: { enabled: true, level: 2 },
+          files: { start: 0, end: 100, data: [] }
+        },
+      });
+
+      let pageStart = 0;
+      let liveLogStarted = false;
+
+      function getPageSize() {
+        return parseInt(document.getElementById('page-size')?.value) || 20;
+      }
+      function loadEvents(start) {
+        pageStart = Math.max(0, start);
+        Dashboard.call('get', { name: 'event', start: pageStart, size: getPageSize() });
+      }
+      function loadFiles() {
+        Dashboard.call('get', { name: 'files', start: 0, end: 100 });
+      }
+      function formatBytes(n) {
+        const v = Number(n) || 0;
+        if (v < 1024) return v + ' B';
+        if (v < 1024 * 1024) return (v / 1024).toFixed(1) + ' KB';
+        return (v / (1024 * 1024)).toFixed(1) + ' MB';
+      }
+      function deleteFile(name) {
+        fetch('fs/files/' + encodeURIComponent(name), {
+          method: 'DELETE',
+          credentials: 'same-origin',
+        }).then(() => loadFiles()).catch((err) => console.error(err));
+      }
+      function clearLiveLog() {
+        const el = document.getElementById('live-log');
+        if (el) el.textContent = '';
+      }
+      window.ocppParametersMap = window.ocppParametersMap || new Map();
+
+      function onOcpp16ParamChanged() {
+        const selectedKey = document.getElementById('ocpp16-param')?.value;
+        const param = window.ocppParametersMap.get(selectedKey);
+        const valueEl = document.getElementById('ocpp16-value');
+        const roEl = document.getElementById('ocpp16-readonly');
+        const submitEl = document.getElementById('ocpp16-submit');
+        if (!param) {
+          if (valueEl) valueEl.value = '';
+          if (roEl) roEl.textContent = '—';
+          return;
+        }
+        if (valueEl) {
+          valueEl.value = param.value || '';
+          valueEl.disabled = !!param.readonly;
+        }
+        if (roEl) roEl.textContent = param.readonly ? 'Yes (Read-Only)' : 'No (Editable)';
+        if (submitEl) submitEl.disabled = !!param.readonly;
+      }
+
+      function loadOcpp16Config() {
+        const resultEl = document.getElementById('ocpp16-result');
+        return fetch('/api/ocpp/config', { credentials: 'same-origin' })
+          .then((r) => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+          })
+          .then((payload) => {
+            const keys = payload?.configurationKey;
+            if (!Array.isArray(keys)) throw new Error('No configurationKey');
+            window.ocppParametersMap = new Map();
+            keys.forEach((item) => {
+              window.ocppParametersMap.set(item.key, {
+                value: item.value,
+                readonly: !!item.readonly,
+              });
+            });
+            const select = document.getElementById('ocpp16-param');
+            if (select) {
+              const prev = select.value;
+              select.innerHTML = Array.from(window.ocppParametersMap.keys())
+                .map((key) => `<option value="${key}">${key}</option>`)
+                .join('');
+              if (prev && window.ocppParametersMap.has(prev)) select.value = prev;
+            }
+            onOcpp16ParamChanged();
+            if (resultEl) resultEl.textContent = `Loaded ${window.ocppParametersMap.size} keys.`;
+          })
+          .catch((err) => {
+            console.error(err);
+            if (resultEl) resultEl.textContent = 'Failed to load OCPP configuration: ' + err;
+          });
+      }
+
+      async function submitOcpp16Param() {
+        const selectedKey = document.getElementById('ocpp16-param')?.value;
+        const newValue = document.getElementById('ocpp16-value')?.value ?? '';
+        const resultEl = document.getElementById('ocpp16-result');
+        if (!selectedKey) return;
+        try {
+          const response = await fetch('/api/ocpp/config', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: selectedKey, value: newValue }),
+          });
+          if (!response.ok) {
+            if (resultEl) resultEl.textContent = 'Failed to update parameter on server.';
+            return;
+          }
+          const payload = await response.json();
+          if (payload.status === 'Accepted' || payload.status === 'RebootRequired') {
+            if (window.ocppParametersMap.has(selectedKey)) {
+              window.ocppParametersMap.get(selectedKey).value = newValue;
+            }
+          }
+          if (resultEl) {
+            resultEl.textContent =
+              `Get response with status: ${payload.status} for ${selectedKey} = ${newValue}`;
+          }
+        } catch (error) {
+          console.error(error);
+          if (resultEl) resultEl.textContent = 'An error occurred while updating the OCPP parameter.';
+        }
+      }
+      function startLiveLog() {
+        if (liveLogStarted) return;
+        liveLogStarted = true;
+        const pre = document.getElementById('live-log');
+        if (!pre) return;
+        const decoder = new TextDecoder();
+        const pump = (reader) => reader.read().then(({ done, value }) => {
+          if (done) {
+            liveLogStarted = false;
+            return;
+          }
+          pre.textContent += decoder.decode(value, { stream: true });
+          pre.scrollTop = pre.scrollHeight;
+          return pump(reader);
+        }).catch(() => { liveLogStarted = false; });
+
+        fetch('/api/log/static', { credentials: 'same-origin' })
+          .then((r) => r.text())
+          .then((t) => { pre.textContent = t; pre.scrollTop = pre.scrollHeight; })
+          .then(() => fetch('/api/log/live', { credentials: 'same-origin' }))
+          .then((r) => {
+            if (!r.ok) throw new Error('live log ' + r.status);
+            return r.body.getReader();
+          })
+          .then(pump)
+          .catch((err) => {
+            liveLogStarted = false;
+            pre.textContent += '\n[Sim] Live log error: ' + err + '\n';
+          });
+      }
+    </script>
+    <style>
+:root {
+  --bg: #f1f5f9;
+  --card: #ffffff;
+  --ink: #0f172a;
+  --muted: #64748b;
+  --line: #e2e8f0;
+  --accent: #0ea5e9;
+  --good: #16a34a;
+  --warn: #d97706;
+  --bad: #dc2626;
+  --charge: #059669;
+  --max-width: 72rem;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font: 500 14px/1.45 "Segoe UI", system-ui, sans-serif;
+  color: var(--ink);
+  background:
+    radial-gradient(900px 480px at 10% -10%, rgba(14,165,233,.16), transparent 60%),
+    radial-gradient(700px 420px at 90% 0%, rgba(16,185,129,.12), transparent 55%),
+    linear-gradient(180deg, #f8fafc, #eef2f7);
+}
+a { color: inherit; text-decoration: none; }
+.header {
+  position: sticky; top: 0; z-index: 20;
+  backdrop-filter: blur(10px);
+  background: rgba(248,250,252,.88);
+  border-bottom: 1px solid var(--line);
+}
+.header-inner {
+  max-width: var(--max-width); margin: 0 auto;
+  padding: .65rem 1.25rem;
+  display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+}
+.brand { display: flex; align-items: center; gap: .75rem; font-weight: 700; letter-spacing: -.02em; }
+.brand-mark {
+  width: 2rem; height: 2rem; border-radius: .55rem;
+  background: linear-gradient(145deg, #38bdf8, #0f766e);
+  box-shadow: 0 6px 16px rgba(14,165,233,.25);
+}
+.nav { display: flex; flex-wrap: wrap; gap: .35rem; }
+.nav-link {
+  display: inline-flex; align-items: center; gap: .4rem;
+  padding: .45rem .75rem; border-radius: .55rem; color: var(--muted);
+  border: 1px solid transparent; font-weight: 600; font-size: .85rem;
+}
+.nav-link:hover { background: #fff; color: var(--ink); }
+.nav-link-active {
+  color: #0369a1; background: #fff;
+  border-color: #bae6fd; box-shadow: 0 1px 2px rgba(148,163,184,.15);
+}
+.live {
+  display: inline-flex; align-items: center; gap: .4rem;
+  font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--muted);
+}
+.dot { width: .55rem; height: .55rem; border-radius: 50%; background: #cbd5e1; }
+.dot-on { background: var(--good); box-shadow: 0 0 0 3px rgba(22,163,74,.18); }
+.stage { max-width: var(--max-width); margin: 0 auto; padding: 1rem 1.25rem 2rem; }
+.tab-panel[hidden] { display: none; }
+.hidden { display: none !important; }
+.grid { display: grid; gap: 1rem; }
+.grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 900px) {
+  .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+  .header-inner { flex-direction: column; align-items: stretch; }
+}
+.card {
+  background: var(--card); border: 1px solid rgba(203,213,225,.8);
+  border-radius: .85rem;
+  box-shadow: 0 8px 24px rgba(148,163,184,.1);
+  overflow: hidden; display: flex; flex-direction: column;
+}
+.card-h {
+  display: flex; align-items: center; justify-content: space-between; gap: .75rem;
+  min-height: 3rem; padding: 0 1rem; border-bottom: 1px solid var(--line);
+  font-weight: 700;
+}
+.card-b { padding: 1rem; display: flex; flex-direction: column; gap: .75rem; flex: 1; }
+.card-f {
+  display: flex; justify-content: flex-end; gap: .5rem;
+  padding: .75rem 1rem; border-top: 1px solid var(--line);
+}
+.badge {
+  display: inline-flex; align-items: center; padding: .2rem .55rem;
+  border-radius: .4rem; font-size: .72rem; font-weight: 700;
+  letter-spacing: .05em; text-transform: uppercase; border: 1px solid transparent;
+}
+.badge-ok { color: #166534; background: #dcfce7; border-color: #86efac; }
+.badge-info { color: #075985; background: #e0f2fe; border-color: #7dd3fc; }
+.badge-warn { color: #92400e; background: #fef3c7; border-color: #fcd34d; }
+.badge-bad { color: #991b1b; background: #fee2e2; border-color: #fca5a5; }
+.badge-charge { color: #065f46; background: #d1fae5; border-color: #6ee7b7; }
+.metric { display: flex; flex-direction: column; gap: .2rem; }
+.metric-l { color: var(--muted); font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+.metric-v { font-size: 1.35rem; font-weight: 700; letter-spacing: -.02em; }
+.metric-u { color: #94a3b8; font-size: .85rem; font-weight: 600; margin-left: .15rem; }
+.row { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
+.field { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
+.field-l { min-width: 7rem; color: var(--muted); font-size: .75rem; font-weight: 700; text-transform: uppercase; }
+.field-i {
+  flex: 1; min-width: 0; padding: .45rem .7rem;
+  border: 1px solid var(--line); border-radius: .5rem; font: inherit; color: var(--ink);
+  background: #fff; outline: none;
+}
+.field-i:focus { border-color: #7dd3fc; }
+.field-i.edited { border-color: #86efac; background: #f0fdf4; }
+.field-ta {
+  flex: 1; min-width: 0; min-height: 8rem; padding: .45rem .7rem;
+  border: 1px solid var(--line); border-radius: .5rem; font: 500 12px/1.4 ui-monospace, monospace;
+  color: var(--ink); background: #fff; outline: none; resize: vertical;
+}
+.field-ta:focus { border-color: #7dd3fc; }
+.table { width: 100%; border-collapse: collapse; }
+.table td { padding: .55rem .35rem; border-top: 1px solid var(--line); vertical-align: middle; }
+.table tr:first-child td { border-top: none; }
+.btn-danger { color: #991b1b; background: #fff; border-color: #fca5a5; }
+.btn-icon { width: 2rem; padding: 0; }
+.toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: .75rem; margin: .5rem 0 1rem; }
+.user-chip {
+  display: inline-flex; align-items: center; gap: .45rem;
+  padding: .35rem .65rem; border-radius: .55rem; border: 1px solid var(--line);
+  background: #fff; color: var(--muted); font-size: .8rem; font-weight: 700;
+}
+.user-chip svg { width: 1rem; height: 1rem; cursor: pointer; }
+#auth .card { box-shadow: 0 16px 40px rgba(148,163,184,.2); }
+.h2 { margin: 0 0 .75rem; font-size: 1.05rem; }
+.prio {
+  display: inline-flex; align-items: center; padding: .15rem .5rem;
+  border-radius: 999px; font-size: .72rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .04em; border: 1px solid transparent;
+}
+.prio-high { color: #7f1d1d; background: #fee2e2; border-color: #fca5a5; }
+.prio-medium { color: #854d0e; background: #fef3c7; border-color: #fcd34d; }
+.prio-low { color: #14532d; background: #dcfce7; border-color: #86efac; }
+.event-log { overflow: auto; max-height: 70vh; border: 1px solid var(--line); border-radius: .55rem; background: #fff; }
+.event-log table { width: 100%; border-collapse: separate; border-spacing: 0; }
+.live-log {
+  margin: 0; padding: .75rem 1rem; min-height: 22rem; max-height: 28rem;
+  overflow: auto; white-space: pre-wrap; word-break: break-word;
+  font: 500 12px/1.45 ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+  color: #e2e8f0; background: #0f172a; border-radius: .55rem;
+}
+.log-level-hint { font-size: .75rem; color: var(--muted); }
+.chart-panel .card-h { align-items: center; }
+.chart-legend { display: flex; flex-wrap: wrap; gap: .65rem; align-items: center; }
+.legend-item { display: inline-flex; align-items: center; gap: .35rem; font-size: .75rem; font-weight: 600; color: var(--muted); }
+.legend-dot { width: .55rem; height: .55rem; border-radius: 50%; display: inline-block; }
+.legend-dot-v { background: #0ea5e9; }
+.legend-dot-a { background: #f59e0b; }
+#graph1, #graph2 { width: 100%; height: 100%; min-height: 11rem; }
+.file-list { display: flex; flex-direction: column; gap: 0; }
+.file-list:empty::before { content: "No files in mo_store"; color: var(--muted); padding: .5rem 0; }
+.file-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center; gap: 1rem; padding: .7rem 0;
+  border-top: 1px solid var(--line);
+}
+.file-row:first-child { border-top: none; }
+.file-info { display: flex; align-items: center; gap: .65rem; min-width: 0; }
+.file-name {
+  min-width: 0; font-weight: 700; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.file-size { color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; }
+.file-actions { display: flex; gap: .35rem; }
+.event-log th {
+  position: sticky; top: 0; z-index: 1;
+  background: rgba(255,255,255,.92); backdrop-filter: blur(6px);
+  text-align: left; font-size: .75rem; text-transform: uppercase; letter-spacing: .04em;
+  color: #64748b; padding: .65rem .85rem; border-bottom: 1px solid #cbd5e1;
+}
+.event-log td {
+  padding: .65rem .85rem; border-bottom: 1px solid #e2e8f0;
+  font-size: .875rem; color: #0f172a; white-space: nowrap;
+}
+.event-log tr:last-child td { border-bottom: 0; }
+.event-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 1rem; padding: .35rem 0 .85rem; font-weight: 700; color: #475569;
+}
+.toggle {
+  -webkit-appearance: none; appearance: none; cursor: pointer;
+  width: 2.75rem; height: 1.55rem; border-radius: 999px; border: 0;
+  background: #cbd5e1; position: relative; outline: 0;
+}
+.toggle::after {
+  content: ""; position: absolute; top: 2px; left: 2px;
+  width: 1.25rem; height: 1.25rem; border-radius: 50%; background: #fff;
+  transition: transform .18s ease; box-shadow: 0 2px 6px rgba(15,23,42,.15);
+}
+.toggle:checked { background: linear-gradient(180deg, #34d399, #059669); }
+.toggle:checked::after { transform: translateX(1.15rem); }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  height: 2rem; padding: 0 .9rem; border-radius: .5rem; border: 1px solid transparent;
+  font: inherit; font-weight: 600; cursor: pointer;
+}
+.btn-primary {
+  color: #fff; background: linear-gradient(160deg, #38bdf8, #0284c7);
+  border-color: #0369a1; box-shadow: 0 4px 12px rgba(14,165,233,.25);
+}
+.btn-secondary { color: var(--muted); background: #fff; border-color: var(--line); }
+.note {
+  color: #075985; background: #e0f2fe; border: 1px solid #7dd3fc;
+  border-radius: .55rem; padding: .75rem .9rem; font-size: .86rem; line-height: 1.5;
+}
+.status-Available, .status-Available { }
+.h2 { margin: 0 0 .75rem; font-size: 1.05rem; }
+.muted { color: var(--muted); }
+    </style>
+  </head>
+  <body style="visibility: hidden;">
+    <section id="auth" style="display:none; min-height:100vh;">
+      <div class="stage" style="min-height:100vh; display:flex; align-items:center; justify-content:center;">
+        <div class="card" style="width:100%; max-width:28rem;">
+          <div class="card-h">Dashboard Sign In</div>
+          <div class="card-b">
+            <form id="login-form" autocomplete="on" style="display:flex; flex-direction:column; gap:.75rem;">
+              <div class="field">
+                <label class="field-l" for="login-username">User</label>
+                <input id="login-username" class="field-i" type="text" name="username" autocomplete="username" placeholder="admin" />
+              </div>
+              <div class="field">
+                <label class="field-l" for="login-password">Password</label>
+                <input id="login-password" class="field-i" type="password" name="password" autocomplete="current-password" placeholder="••••••" />
+              </div>
+              <div id="login-error" class="note" style="display:none; background:#fee2e2; border-color:#fca5a5; color:#991b1b;"></div>
+              <div class="muted" style="font-size:.85rem;">Use password <code>admin</code> (level 7) or <code>user</code> (level 3).</div>
+              <div style="display:flex; justify-content:flex-end;">
+                <button class="btn btn-primary" id="login-submit" type="submit">Login</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div id="app" style="display:none;">
+      <header class="header">
+        <div class="header-inner">
+          <div class="brand">
+            <div class="brand-mark" aria-hidden="true"></div>
+            <div>
+              <div>MicroOcpp Simulator</div>
+              <div class="muted" style="font-size:.75rem;font-weight:600;">device-dashboard</div>
+            </div>
+          </div>
+          <nav class="nav" role="tablist">
+            <a href="#status" class="nav-link nav-link-active" data-tab="status">Status</a>
+            <a href="#connectors" class="nav-link" data-tab="connectors">Connectors</a>
+            <a href="#events" class="nav-link" data-tab="events">Events</a>
+            <a href="#log" class="nav-link ${__status.userlevel > 0 && __status.userlevel < 7 ? 'hidden' : ''}" data-tab="log">Log</a>
+            <a href="#ocpp" class="nav-link ${__status.userlevel > 0 && __status.userlevel < 7 ? 'hidden' : ''}" data-tab="ocpp">OCPP</a>
+            <a href="#files" class="nav-link ${__status.userlevel > 0 && __status.userlevel < 7 ? 'hidden' : ''}" data-tab="files">Files</a>
+            <a href="#settings" class="nav-link ${__status.userlevel > 0 && __status.userlevel < 7 ? 'hidden' : ''}" data-tab="settings">Settings</a>
+          </nav>
+          <div class="live">
+            <span class="dot ${__status.online ? 'dot-on' : ''}"></span>
+            <span>${__status.online ? 'live' : 'offline'}</span>
+            <span class="muted">·</span>
+            <span class="${ocpp.connected ? 'badge badge-ok' : 'badge badge-warn'}">${ocpp.connected ? 'OCPP up' : 'OCPP down'}</span>
+            <span class="user-chip">
+              <span>${__status.userlevel == 3 ? 'user' : 'admin'}</span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   onclick="Dashboard.logout().then(() => location.reload())" title="Logout">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <path d="M16 17l5-5-5-5" />
+                <path d="M21 12H9" />
+              </svg>
+            </span>
+          </div>
+        </div>
+      </header>
+
+      <main class="stage">
+        <!-- STATUS -->
+        <section id="status" class="tab-panel">
+          <p class="muted" style="margin:0 0 1rem;">Live EVSE state — toggles write immediately; meters refresh every second.</p>
+          <div class="grid grid-2">
+            <article class="card">
+              <div class="card-h">
+                <span>Connector 1</span>
+                <span class="badge ${c1.chargePointStatus === 'Charging' ? 'badge-charge' : (c1.chargePointStatus === 'Faulted' ? 'badge-bad' : 'badge-info')}">${c1.chargePointStatus}</span>
+              </div>
+              <div class="card-b">
+                <div class="grid grid-4">
+                  <div class="metric"><div class="metric-l">Energy</div><div><span class="metric-v" data-bind="c1.energy">0</span><span class="metric-u">Wh</span></div></div>
+                  <div class="metric"><div class="metric-l">Power</div><div><span class="metric-v" data-bind="c1.power">0</span><span class="metric-u">W</span></div></div>
+                  <div class="metric"><div class="metric-l">Current</div><div><span class="metric-v" data-bind="c1.current">0</span><span class="metric-u">A</span></div></div>
+                  <div class="metric"><div class="metric-l">Voltage</div><div><span class="metric-v" data-bind="c1.voltage">0</span><span class="metric-u">V</span></div></div>
+                </div>
+                <div class="row"><span>EV Plugged</span><input type="checkbox" class="toggle" data-bind="c1.evPlugged" data-autosave="1" /></div>
+                <div class="row"><span>EV Ready</span><input type="checkbox" class="toggle" data-bind="c1.evReady" data-autosave="1" /></div>
+                <div class="row"><span>EVSE Ready</span><input type="checkbox" class="toggle" data-bind="c1.evseReady" data-autosave="1" /></div>
+                <div class="field"><label class="field-l">RFID</label><input class="field-i" data-bind="c1.nfcTag" placeholder="idTag" /></div>
+                <div class="row muted" style="font-size:.8rem;">Session: <strong data-bind="c1.idTag">—</strong> · Tx <strong data-bind="c1.transactionId">-1</strong></div>
+              </div>
+              <div class="card-f">
+                <button class="btn btn-primary" data-save="c1">Present RFID</button>
+              </div>
+            </article>
+
+            <article class="card">
+              <div class="card-h">
+                <span>Connector 2</span>
+                <span class="badge ${c2.chargePointStatus === 'Charging' ? 'badge-charge' : (c2.chargePointStatus === 'Faulted' ? 'badge-bad' : 'badge-info')}">${c2.chargePointStatus}</span>
+              </div>
+              <div class="card-b">
+                <div class="grid grid-4">
+                  <div class="metric"><div class="metric-l">Energy</div><div><span class="metric-v" data-bind="c2.energy">0</span><span class="metric-u">Wh</span></div></div>
+                  <div class="metric"><div class="metric-l">Power</div><div><span class="metric-v" data-bind="c2.power">0</span><span class="metric-u">W</span></div></div>
+                  <div class="metric"><div class="metric-l">Current</div><div><span class="metric-v" data-bind="c2.current">0</span><span class="metric-u">A</span></div></div>
+                  <div class="metric"><div class="metric-l">Voltage</div><div><span class="metric-v" data-bind="c2.voltage">0</span><span class="metric-u">V</span></div></div>
+                </div>
+                <div class="row"><span>EV Plugged</span><input type="checkbox" class="toggle" data-bind="c2.evPlugged" data-autosave="1" /></div>
+                <div class="row"><span>EV Ready</span><input type="checkbox" class="toggle" data-bind="c2.evReady" data-autosave="1" /></div>
+                <div class="row"><span>EVSE Ready</span><input type="checkbox" class="toggle" data-bind="c2.evseReady" data-autosave="1" /></div>
+                <div class="field"><label class="field-l">RFID</label><input class="field-i" data-bind="c2.nfcTag" placeholder="idTag" /></div>
+                <div class="row muted" style="font-size:.8rem;">Session: <strong data-bind="c2.idTag">—</strong> · Tx <strong data-bind="c2.transactionId">-1</strong></div>
+              </div>
+              <div class="card-f">
+                <button class="btn btn-primary" data-save="c2">Present RFID</button>
+              </div>
+            </article>
+          </div>
+
+          <div class="grid grid-2" style="margin-top:1rem;">
+            <article class="card chart-panel">
+              <div class="card-h">
+                <span>Connector 1 · Voltage / Current</span>
+                <div class="chart-legend">
+                  <div class="legend-item"><span class="legend-dot legend-dot-v"></span>Voltage (V)</div>
+                  <div class="legend-item"><span class="legend-dot legend-dot-a"></span>Current (A)</div>
+                </div>
+              </div>
+              <div class="card-b">
+                <div id="graph1"></div>
+              </div>
+            </article>
+            <article class="card chart-panel">
+              <div class="card-h">
+                <span>Connector 2 · Voltage / Current</span>
+                <div class="chart-legend">
+                  <div class="legend-item"><span class="legend-dot legend-dot-v"></span>Voltage (V)</div>
+                  <div class="legend-item"><span class="legend-dot legend-dot-a"></span>Current (A)</div>
+                </div>
+              </div>
+              <div class="card-b">
+                <div id="graph2"></div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <!-- CONNECTORS DETAIL -->
+        <section id="connectors" class="tab-panel" hidden>
+          <div class="grid grid-2">
+            <article class="card">
+              <div class="card-h"><span>Connector 1 — Controls</span></div>
+              <div class="card-b">
+                <h3 class="h2">EVSE</h3>
+                <div class="row"><span>EV Plugged</span><input type="checkbox" class="toggle" data-bind="c1.evPlugged" data-autosave="1" /></div>
+                <div class="row"><span>EVSE Plugged</span><input type="checkbox" class="toggle" data-bind="c1.evsePlugged" data-autosave="1" /></div>
+                <div class="row"><span>EV Ready</span><input type="checkbox" class="toggle" data-bind="c1.evReady" data-autosave="1" /></div>
+                <div class="row"><span>EVSE Ready</span><input type="checkbox" class="toggle" data-bind="c1.evseReady" data-autosave="1" /></div>
+                <div class="row"><span>Status</span><strong data-bind="c1.chargePointStatus">—</strong></div>
+
+                <h3 class="h2">Meter</h3>
+                <div class="grid grid-2">
+                  <div class="metric"><div class="metric-l">Energy</div><div><span data-bind="c1.energy">0</span> Wh</div></div>
+                  <div class="metric"><div class="metric-l">Power</div><div><span data-bind="c1.power">0</span> W</div></div>
+                  <div class="metric"><div class="metric-l">Current</div><div><span data-bind="c1.current">0</span> A</div></div>
+                  <div class="metric"><div class="metric-l">Voltage</div><div><span data-bind="c1.voltage">0</span> V</div></div>
+                </div>
+
+                <h3 class="h2">Transaction / RFID</h3>
+                <div class="row"><span>Session idTag</span><strong data-bind="c1.idTag">—</strong></div>
+                <div class="row"><span>Transaction ID</span><strong data-bind="c1.transactionId">-1</strong></div>
+                <div class="field"><label class="field-l">Present NFC</label><input class="field-i" data-bind="c1.nfcTag" placeholder="A0000000" /></div>
+                <div class="note">Enter an idTag and click Present to simulate RFID authorize / start-stop.</div>
+
+                <h3 class="h2">Smart Charging</h3>
+                <div class="row"><span>Max Power</span><strong><span data-bind="c1.maxPower">0</span> W</strong></div>
+                <div class="row"><span>Max Current</span><strong><span data-bind="c1.maxCurrent">0</span> A</strong></div>
+              </div>
+              <div class="card-f">
+                <button class="btn btn-primary" data-save="c1">Present NFC / Apply</button>
+              </div>
+            </article>
+
+            <article class="card">
+              <div class="card-h"><span>Connector 2 — Controls</span></div>
+              <div class="card-b">
+                <h3 class="h2">EVSE</h3>
+                <div class="row"><span>EV Plugged</span><input type="checkbox" class="toggle" data-bind="c2.evPlugged" data-autosave="1" /></div>
+                <div class="row"><span>EVSE Plugged</span><input type="checkbox" class="toggle" data-bind="c2.evsePlugged" data-autosave="1" /></div>
+                <div class="row"><span>EV Ready</span><input type="checkbox" class="toggle" data-bind="c2.evReady" data-autosave="1" /></div>
+                <div class="row"><span>EVSE Ready</span><input type="checkbox" class="toggle" data-bind="c2.evseReady" data-autosave="1" /></div>
+                <div class="row"><span>Status</span><strong data-bind="c2.chargePointStatus">—</strong></div>
+
+                <h3 class="h2">Meter</h3>
+                <div class="grid grid-2">
+                  <div class="metric"><div class="metric-l">Energy</div><div><span data-bind="c2.energy">0</span> Wh</div></div>
+                  <div class="metric"><div class="metric-l">Power</div><div><span data-bind="c2.power">0</span> W</div></div>
+                  <div class="metric"><div class="metric-l">Current</div><div><span data-bind="c2.current">0</span> A</div></div>
+                  <div class="metric"><div class="metric-l">Voltage</div><div><span data-bind="c2.voltage">0</span> V</div></div>
+                </div>
+
+                <h3 class="h2">Transaction / RFID</h3>
+                <div class="row"><span>Session idTag</span><strong data-bind="c2.idTag">—</strong></div>
+                <div class="row"><span>Transaction ID</span><strong data-bind="c2.transactionId">-1</strong></div>
+                <div class="field"><label class="field-l">Present NFC</label><input class="field-i" data-bind="c2.nfcTag" placeholder="A0000000" /></div>
+
+                <h3 class="h2">Smart Charging</h3>
+                <div class="row"><span>Max Power</span><strong><span data-bind="c2.maxPower">0</span> W</strong></div>
+                <div class="row"><span>Max Current</span><strong><span data-bind="c2.maxCurrent">0</span> A</strong></div>
+              </div>
+              <div class="card-f">
+                <button class="btn btn-primary" data-save="c2">Present NFC / Apply</button>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <!-- EVENTS (layout aligned with tutorials/http/device-dashboard/web_root) -->
+        <section id="events" class="tab-panel" hidden>
+          <div class="card">
+            <div class="card-b">
+              <div class="event-head">
+                <div>EVENT LOG</div>
+                <div class="toolbar" style="margin:0;">
+                  <button class="btn btn-secondary" type="button" onclick="loadEvents(pageStart - getPageSize())">&lt;</button>
+                  <span class="muted">${(event.start ?? 0) + 1}–${(event.start ?? 0) + event.data.length} of ${event.size ?? 0}</span>
+                  <button class="btn btn-secondary" type="button" onclick="loadEvents(pageStart + getPageSize())">&gt;</button>
+                  <button class="btn btn-primary" type="button" onclick="loadEvents(pageStart)">Reload</button>
+                  <label class="muted">Page <input id="page-size" class="field-i" style="width:3.5rem; flex:none;" type="text" value="20" /></label>
+                </div>
+              </div>
+              <div class="event-log">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Type</th>
+                      <th>Prio</th>
+                      <th>Time</th>
+                      <th>Description</th>
+                    </tr>
+                  </thead>
+                  <tbody data-repeat="event.data" data-iterator="ev">
+                    <tr>
+                      <td>${['ocpp','connector','system','auth'][ev.type] || 'system'}</td>
+                      <td>
+                        <span class="prio ${['prio-high','prio-medium','prio-low'][ev.prio] || 'prio-medium'}">
+                          ${['high','medium','low'][ev.prio] || 'medium'}
+                        </span>
+                      </td>
+                      <td>${ev.time}</td>
+                      <td style="white-space:normal;">${ev.message}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- LIVE DEBUG LOG (tutorials/webui/live-log + settings like device-dashboard) -->
+        <section id="log" class="tab-panel" hidden>
+          <div class="grid" style="gap:1rem;">
+            <article class="card">
+              <div class="card-h"><span>Log settings</span></div>
+              <div class="card-b">
+                <div class="grid grid-2">
+                  <label class="field" style="flex-direction:row; align-items:center; gap:.6rem;">
+                    <input type="checkbox" data-bind="log.enabled" />
+                    <span>Capture enabled</span>
+                  </label>
+                  <div class="field">
+                    <label class="field-l">Mongoose log level (0–4)</label>
+                    <input class="field-i" type="number" min="0" max="4" step="1" data-bind="log.level" />
+                    <div class="log-level-hint">0 none · 1 error · 2 info · 3 debug · 4 verbose. Also shows MicroOcpp / OCPP traffic.</div>
+                  </div>
+                </div>
+              </div>
+              <div class="card-f">
+                <button class="btn btn-secondary" data-cancel="log">Cancel</button>
+                <button class="btn btn-primary" data-save="log">Save</button>
+              </div>
+            </article>
+            <article class="card">
+              <div class="card-h">
+                <span>Live log</span>
+                <div class="toolbar" style="margin:0;">
+                  <button class="btn btn-secondary" type="button" onclick="clearLiveLog()">Clear</button>
+                  <button class="btn btn-primary" type="button" onclick="liveLogStarted=false; startLiveLog()">Reconnect</button>
+                </div>
+              </div>
+              <div class="card-b">
+                <pre id="live-log" class="live-log"></pre>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <!-- OCPP (Connection + Station + 1.6 Config + Security) -->
+        <section id="ocpp" class="tab-panel" hidden>
+          <div class="grid grid-2">
+            <article class="card">
+              <div class="card-h">
+                <span>Connection</span>
+                <span class="${ocpp.connected ? 'badge badge-ok' : 'badge badge-warn'}">${ocpp.connected ? 'Connected' : 'Disconnected'}</span>
+              </div>
+              <div class="card-b">
+                <div class="note">Outbound WebSocket to the CSMS (not the browser dashboard socket).</div>
+                <div class="field"><label class="field-l">Backend URL</label><input class="field-i" data-bind="ocpp.backendUrl" placeholder="ws://host:9000" /></div>
+                <div class="field"><label class="field-l">Charge Box ID</label><input class="field-i" data-bind="ocpp.chargeBoxId" /></div>
+                <div class="field"><label class="field-l">Auth Key</label><input class="field-i" type="password" data-bind="ocpp.authorizationKey" /></div>
+                <div class="field"><label class="field-l">Ping (s)</label><input class="field-i" type="number" data-bind="ocpp.pingInterval" /></div>
+                <div class="field"><label class="field-l">Reconnect (s)</label><input class="field-i" type="number" data-bind="ocpp.reconnectInterval" /></div>
+                <div class="field"><label class="field-l">DNS URL</label><input class="field-i" data-bind="ocpp.dnsUrl" placeholder="(not implemented)" /></div>
+              </div>
+              <div class="card-f">
+                <button class="btn btn-secondary" data-cancel="ocpp">Cancel</button>
+                <button class="btn btn-primary" data-save="ocpp">Save Connection</button>
+              </div>
+            </article>
+            <article class="card">
+              <div class="card-h"><span>Station</span></div>
+              <div class="card-b">
+                <div class="field"><label class="field-l">Model</label><input class="field-i" data-bind="station.chargePointModel" /></div>
+                <div class="field"><label class="field-l">Serial</label><input class="field-i" data-bind="station.chargePointSerialNumber" /></div>
+                <div class="field"><label class="field-l">Vendor</label><input class="field-i" data-bind="station.chargePointVendor" /></div>
+                <div class="field"><label class="field-l">Firmware</label><input class="field-i" data-bind="station.firmwareVersion" /></div>
+              </div>
+              <div class="card-f">
+                <button class="btn btn-secondary" data-cancel="station">Cancel</button>
+                <button class="btn btn-primary" data-save="station">Save Station</button>
+              </div>
+            </article>
+          </div>
+
+          <div class="grid grid-2" style="margin-top:1rem;">
+            <article class="card">
+              <div class="card-h">
+                <span>OCPP 1.6 Configuration</span>
+                <button class="btn btn-secondary" type="button" onclick="loadOcpp16Config()">Reload</button>
+              </div>
+              <div class="card-b">
+                <div class="note">ChangeConfiguration keys from MicroOcpp (same idea as web_config.html).</div>
+                <div class="field">
+                  <label class="field-l">Parameter</label>
+                  <select id="ocpp16-param" class="field-i" onchange="onOcpp16ParamChanged()"></select>
+                </div>
+                <div class="field">
+                  <label class="field-l">Value</label>
+                  <input id="ocpp16-value" class="field-i" type="text" />
+                </div>
+                <div class="row"><span>Read-only</span><strong id="ocpp16-readonly">—</strong></div>
+                <p id="ocpp16-result" class="note" style="margin:0;"></p>
+              </div>
+              <div class="card-f">
+                <button id="ocpp16-submit" class="btn btn-primary" type="button" onclick="submitOcpp16Param()">Submit Parameter Change</button>
+              </div>
+            </article>
+            <article class="card">
+              <div class="card-h"><span>Security</span></div>
+              <div class="card-b">
+                <div class="note">CA stored as <code>mo_store/ca_cert.pem</code> (shared with Connection).</div>
+                <div style="display:flex;flex-direction:column;gap:.35rem;margin-bottom:.75rem;">
+                  <label class="field-l">CA Certificate</label>
+                  <textarea class="field-ta" data-bind="security.caCert" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+                </div>
+                <h3 class="h2">Cipher Suites <span class="badge badge-warn">Demo</span></h3>
+                <table class="table">
+                  <tr><td><b>Name</b></td><td data-bind="security.cipherName">TLS</td></tr>
+                  <tr><td><b>Version</b></td><td data-bind="security.cipherVersion">v2.3.1</td></tr>
+                  <tr><td><b>Expiration Date</b></td><td data-bind="security.cipherExpiry">26.12.2026</td></tr>
+                </table>
+              </div>
+              <div class="card-f">
+                <button class="btn btn-secondary" data-cancel="security">Cancel</button>
+                <button class="btn btn-primary" data-save="security">Save Security</button>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <!-- FILES (mo_store, device-dashboard/full pattern) -->
+        <section id="files" class="tab-panel" hidden>
+          <div class="grid grid-2">
+            <article class="card">
+              <div class="card-h">
+                <span>File Manager <span class="muted" style="font-weight:600;">· ${files.size ?? files.data.length} files</span></span>
+                <label class="btn btn-primary">
+                  Upload
+                  <input type="file" hidden data-upload="files" />
+                </label>
+              </div>
+              <div class="card-b">
+                <div class="file-list" data-repeat="files.data" data-iterator="f">
+                  <div class="file-row">
+                    <div class="file-info">
+                      <div class="file-name" title="${f.name}">${f.name}</div>
+                    </div>
+                    <div class="file-size">${formatBytes(f.size)}</div>
+                    <div class="file-actions">
+                      <a href="fs/files/${encodeURIComponent(f.name)}" target="_blank" class="btn btn-secondary">View</a>
+                      <button type="button" class="btn btn-danger" onclick="deleteFile('${f.name.replace(/'/g, "\\'")}'); return false;">Delete</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="card-f">
+                <button class="btn btn-secondary" type="button" onclick="loadFiles()">Reload</button>
+              </div>
+            </article>
+            <article class="card">
+              <div class="card-h"><span>About</span></div>
+              <div class="card-b">
+                <div class="note">
+                  Root directory is <code>./mo_store</code> (same store used by MicroOcpp configs,
+                  certificates, and simulator JSON). Upload, view, and delete files here.
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <!-- SETTINGS (Network + Firmware) -->
+        <section id="settings" class="tab-panel" hidden>
+          <div class="grid grid-2">
+            <article class="card">
+              <div class="card-h"><span>Network</span><span class="badge badge-warn">Demo</span></div>
+              <div class="card-b">
+                <div class="note">Static Wi‑Fi demo (parity with the old webapp). Values are not applied to a real radio.</div>
+                <h3 class="h2">Nearby Networks</h3>
+                <table class="table">
+                  <tr>
+                    <td>Local_Network_Point</td>
+                    <td><span class="badge badge-ok">Connected</span></td>
+                    <td><button class="btn btn-danger" type="button">Disconnect</button></td>
+                  </tr>
+                  <tr>
+                    <td>Close_by_Wifi_0293</td>
+                    <td><span class="badge badge-info">Available</span></td>
+                    <td><button class="btn btn-secondary" type="button">Connect</button></td>
+                  </tr>
+                  <tr>
+                    <td>Wifi-9079378</td>
+                    <td><span class="badge badge-warn">Not Nearby</span></td>
+                    <td><button class="btn btn-secondary" type="button">Connect</button></td>
+                  </tr>
+                </table>
+                <h3 class="h2">Connect to Wi‑Fi</h3>
+                <div class="field"><label class="field-l">SSID</label><input class="field-i" data-bind="network.ssid" /></div>
+                <div class="field"><label class="field-l">Password</label><input class="field-i" type="password" data-bind="network.password" /></div>
+                <div class="row"><span>Enabled</span><input type="checkbox" class="toggle" data-bind="network.enabled" data-autosave="1" /></div>
+                <div class="row"><span>Status</span><strong data-bind="network.status">—</strong></div>
+              </div>
+              <div class="card-f">
+                <button class="btn btn-secondary" data-cancel="network">Cancel</button>
+                <button class="btn btn-primary" data-save="network">Save Network</button>
+              </div>
+            </article>
+            <article class="card">
+              <div class="card-h"><span>Firmware</span></div>
+              <div class="card-b">
+                <div class="field"><label class="field-l">Version</label><input class="field-i" data-bind="firmware.version" /></div>
+                <div class="row"><span>Build date</span><strong data-bind="firmware.date">—</strong></div>
+                <div class="row"><span>Status</span><strong data-bind="firmware.status">—</strong></div>
+                <div class="field"><label class="field-l">Check URL</label><input class="field-i" data-bind="firmware.url" /></div>
+                <div class="field"><label class="field-l">Interval (s)</label><input class="field-i" type="number" data-bind="firmware.interval" /></div>
+                <div class="row"><span>Current</span><strong>${firmware.version}</strong></div>
+                <label class="btn btn-primary" style="align-self:flex-start;">
+                  Select .bin file
+                  <input type="file" accept=".bin" hidden data-ota="1" />
+                </label>
+                <div class="note">Desktop simulator: OTA via <code>/api/ota</code> is UI-only. Version is stored with Station metadata.</div>
+              </div>
+              <div class="card-f">
+                <button class="btn btn-secondary" data-cancel="firmware">Cancel</button>
+                <button class="btn btn-primary" data-save="firmware">Save Firmware</button>
+              </div>
+            </article>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      document.addEventListener('DOMContentLoaded', () => {
+        const tabs = Array.from(document.querySelectorAll('.nav-link[data-tab]'));
+        const panels = Array.from(document.querySelectorAll('.tab-panel'));
+
+        const mkMeterGraph = (el) => ({
+          el,
+          plot: null,
+          opts: {
+            width: 10,
+            height: 10,
+            legend: { show: false },
+            axes: [
+              { size: 25, gap: 2 },
+              { scale: 'V', size: 42, gap: 2, stroke: '#0ea5e9', grid: { show: true } },
+              { scale: 'A', side: 1, size: 42, gap: 2, stroke: '#f59e0b', grid: { show: false } },
+            ],
+            scales: {
+              x: { time: false },
+              V: {},
+              A: {},
+            },
+            series: [
+              {},
+              { label: 'V', scale: 'V', stroke: '#0ea5e9', fill: '#0ea5e91a', width: 2 },
+              { label: 'A', scale: 'A', stroke: '#f59e0b', fill: '#f59e0b1a', width: 2 },
+            ],
+          },
+        });
+
+        const graphs = {
+          g1: mkMeterGraph(document.getElementById('graph1')),
+          g2: mkMeterGraph(document.getElementById('graph2')),
+        };
+
+        function mkGraph(g) {
+          if (!g?.el || typeof uPlot === 'undefined') return;
+          if (!g.plot) g.plot = new uPlot(g.opts, [], g.el);
+          const rect = g.el.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            g.plot.setSize({ width: rect.width, height: rect.height });
+          }
+        }
+
+        function updateMeterGraph(g, data) {
+          if (!g?.plot || !Array.isArray(data)) return;
+          g.plot.setData([
+            data.map((x) => x[0]),
+            data.map((x) => x[1]),
+            data.map((x) => x[2]),
+          ]);
+        }
+
+        const userTabs = new Set(['status', 'connectors', 'events']);
+        const isUserOnly = () => {
+          const lvl = Dashboard.status?.userlevel || 0;
+          return lvl > 0 && lvl < 7;
+        };
+
+        const activate = (id) => {
+          let tabId = id;
+          if (isUserOnly() && !userTabs.has(tabId)) {
+            tabId = 'status';
+          }
+          const target = document.getElementById(tabId) || document.getElementById('status');
+          tabs.forEach((t) => t.classList.toggle('nav-link-active', t.dataset.tab === target.id));
+          panels.forEach((p) => {
+            const on = p.id === target.id;
+            p.hidden = !on;
+            p.classList.toggle('tab-panel-active', on);
+          });
+          if (target.id === 'events') loadEvents(pageStart);
+          if (target.id === 'log') startLiveLog();
+          if (target.id === 'ocpp') loadOcpp16Config();
+          if (target.id === 'files') loadFiles();
+          if (target.id === 'status') {
+            requestAnimationFrame(() => {
+              mkGraph(graphs.g1);
+              mkGraph(graphs.g2);
+            });
+          }
+        };
+
+        tabs.forEach((tab) => {
+          tab.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            activate(tab.dataset.tab);
+            history.replaceState(null, '', '#' + tab.dataset.tab);
+          });
+        });
+
+        activate((location.hash || '#status').slice(1));
+
+        const passwordEl = document.getElementById('login-password');
+        const loginButtonEl = document.getElementById('login-submit');
+        const loginErrorEl = document.getElementById('login-error');
+
+        function showLogin(yes) {
+          document.getElementById('auth').style.display = yes ? '' : 'none';
+          document.getElementById('app').style.display = yes ? 'none' : '';
+          if (yes) {
+            document.body.style.visibility = 'visible';
+            passwordEl?.focus();
+          }
+        }
+
+        loginButtonEl.onclick = function (ev) {
+          ev.preventDefault();
+          const username = (document.getElementById('login-username')?.value || '').trim();
+          const password = passwordEl.value || '';
+          Dashboard.login({ username, password }).then(() => {
+            if (loginErrorEl) loginErrorEl.style.display = 'none';
+            showLogin(false);
+            activate((location.hash || '#status').slice(1));
+          }).catch(() => {
+            if (loginErrorEl) {
+              loginErrorEl.style.display = '';
+              loginErrorEl.textContent = 'Login failed. Try password admin or user.';
+            }
+          });
+          passwordEl.value = '';
+        };
+
+        document.getElementById('login-form')?.addEventListener('submit', (ev) => {
+          ev.preventDefault();
+          loginButtonEl.click();
+        });
+
+        Dashboard.on('logout', () => showLogin(true));
+        Dashboard.on('ready', () => {
+          document.body.style.visibility = 'visible';
+          activate((location.hash || '#status').slice(1));
+        });
+        Dashboard.on('change', (args) => {
+          if (args?.event != null) loadEvents(pageStart);
+          if (typeof args?.files === 'number') loadFiles();
+          if (args?.g1?.data) updateMeterGraph(graphs.g1, args.g1.data);
+          if (args?.g2?.data) updateMeterGraph(graphs.g2, args.g2.data);
+        });
+        Dashboard.login().catch(() => showLogin(true));
+      });
+    </script>
+  </body>
+</html>
