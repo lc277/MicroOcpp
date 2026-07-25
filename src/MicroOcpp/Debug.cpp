@@ -37,7 +37,26 @@ void mo_dbg_print_prefix(int level, const char *fn, int line) {
     while (l > 0 && fn[l-1] != '/' && fn[l-1] != '\\') {
         l--;
     }
-    MO_CONSOLE_PRINTF("[MO] %s (%s:%i): ", level_label[level], fn + l, line);
+        /*
+        * BLACK    30
+        * RED      31
+        * GREEN    32
+        * YELLOW   33
+        * BLUE     34
+        * PURPLE   35
+        * CYAN     36
+        * WHITE    37
+    */
+    const char *color[] = {
+        "\033[0m",  // MO_DL_NONE 0x00
+        "\033[31m", // MO_DL_ERROR 0x01
+        "\033[33m", // MO_DL_WARN 0x02
+        "\033[34m", // MO_DL_INFO 0x03
+        "\033[35m", // MO_DL_DEBUG 0x04
+        "\033[36m"  // MO_DL_VERBOSE 0x05
+    };
+    // MO_CONSOLE_PRINTF("%s", color[level]);
+    MO_CONSOLE_PRINTF("[MO] %s (%s:%i): ", color[level], fn + l, line);
 }
 
 #elif MO_DBG_FORMAT == MO_DF_FULL
@@ -50,5 +69,5 @@ void mo_dbg_print_prefix(int level, const char *fn, int line) {
 #endif
 
 void mo_dbg_print_suffix() {
-    MO_CONSOLE_PRINTF("\n");
+    MO_CONSOLE_PRINTF("\033[0m\n");
 }
