@@ -141,7 +141,9 @@ target_compile_definitions(MicroOcpp PUBLIC
 )
 
 # Unit tests (only when this repo is the top-level project)
-if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+option(MO_BUILD_UNIT_TESTS "Build MicroOcpp unit tests (mo_unit_tests)" OFF)
+
+if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME AND MO_BUILD_UNIT_TESTS)
 
 set(MO_SRC_UNIT
     tests/helpers/testHelper.cpp
@@ -225,4 +227,4 @@ target_link_options(mo_unit_tests PUBLIC
     --coverage
 )
 
-endif() # CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME
+endif() # CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME AND MO_BUILD_UNIT_TESTS
